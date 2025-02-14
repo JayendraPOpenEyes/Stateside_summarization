@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from Text_Summarizer import process_input
+from local_Text_Summarizer import process_input
 import subprocess
 from io import BytesIO
 import logging
@@ -105,9 +105,13 @@ def main():
             st.session_state.processing_complete = False
             st.session_state.all_summaries = {}
             
-            for col in ['Model', 'Extractive Summary', 'Abstractive Summary', 'Highlights & Analysis']:
+            for col in ['Extractive Summary', 'Abstractive Summary', 'Highlights & Analysis']:
                 if col not in st.session_state.processed_df.columns:
                     st.session_state.processed_df[col] = ''
+
+            # Uncomment the following lines to add the 'Model' column and write the model name
+            # if 'Model' not in st.session_state.processed_df.columns:
+            #     st.session_state.processed_df['Model'] = ''
 
         df = st.session_state.processed_df
         
@@ -121,7 +125,7 @@ def main():
                     
                     for index, row in df.iterrows():
                         url = row['BillTextURL']
-                        if pd.notna(url) and df.at[index, 'Model'] == '':
+                        if pd.notna(url) and df.at[index, 'Extractive Summary'] == '':
                             processed_count += 1
                             try:
                                 result = process_input(url)
@@ -129,14 +133,16 @@ def main():
                                 
                                 if isinstance(result, dict) and "error" in result:
                                     st.warning(f"{status_msg} - Can't generate summary")
-                                    df.at[index, 'Model'] = result.get('model', 'gpt-4')
+                                    # Uncomment the following line to write the model name
+                                    # df.at[index, 'Model'] = result.get('model', 'gpt-4')
                                     df.at[index, 'Extractive Summary'] = "Error"
                                     df.at[index, 'Abstractive Summary'] = "Error"
                                     df.at[index, 'Highlights & Analysis'] = "Error"
                                 else:
                                     st.success(f"{status_msg} - Completed")
                                     
-                                    df.at[index, 'Model'] = result.get('model', 'gpt-4')
+                                    # Uncomment the following line to write the model name
+                                    # df.at[index, 'Model'] = result.get('model', 'gpt-4')
                                     df.at[index, 'Extractive Summary'] = result.get('extractive', 'Error')
                                     df.at[index, 'Abstractive Summary'] = result.get('abstractive', 'Error')
                                     highlights = format_highlights(result.get('highlights', 'Error'))
@@ -145,7 +151,8 @@ def main():
                             except Exception as e:
                                 logging.error(f"Error processing {url}: {str(e)}")
                                 st.warning(f"{status_msg} - Can't generate summary")
-                                df.at[index, 'Model'] = "Error"
+                                # Uncomment the following line to write the model name
+                                # df.at[index, 'Model'] = "Error"
                                 df.at[index, 'Extractive Summary'] = "Error"
                                 df.at[index, 'Abstractive Summary'] = "Error"
                                 df.at[index, 'Highlights & Analysis'] = "Error"
