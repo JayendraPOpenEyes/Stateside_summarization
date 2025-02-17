@@ -1,3 +1,4 @@
+# This is local File for Text Summarization
 import os
 import re
 import requests
@@ -8,14 +9,14 @@ import base64
 from bs4 import BeautifulSoup
 from PIL import Image
 from pdf2image import convert_from_bytes
-# from dotenv import load_dotenv
+from dotenv import load_dotenv
 import pdfkit
 import tiktoken
 from openai import OpenAI
 import pytesseract  # Add Tesseract for OCR
 
 # Load environment variables from .env file
-# load_dotenv()
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -180,7 +181,7 @@ class TextProcessor:
             else:
                 html += f"<h1>{para.strip()}</h1>\n"
         return html
-    
+
     def generate_json_with_prompt(self, html, base_name):
         """
         Convert HTML to a structured JSON (with keys 'h1' and 'p') using an OpenAI prompt.
@@ -225,8 +226,8 @@ class TextProcessor:
             return json_data  # Return the parsed dictionary
         except Exception as e:
             logging.error(f"Error generating JSON with OpenAI: {str(e)}")
-            return {} 
-          
+            return {}
+
     def truncate_text(self, text, max_tokens=3000):
         """
         Truncate the text so that it stays within the token limit.
@@ -312,32 +313,52 @@ Text:
         json_output = self.generate_json_with_prompt(html, base_name)
         return json_output
 
-def process_input(input_link, model="gpt-4o-mini"):
+    def process_raw_text(self, text, base_name="raw_text"):
+        """
+        Process raw text directly without fetching from a URL.
+        """
+        clean_text = self.preprocess_text(text)
+        summaries = self.generate_summaries_with_chatgpt(clean_text)
+        self.process_full_text_to_json(clean_text, base_name)
+        return {
+            "model": self.model,
+            "extractive": summaries["extractive"],
+            "abstractive": summaries["abstractive"],
+            "highlights": summaries["highlights"]
+        }
+
+def process_input(input_data, model="gpt-4o-mini"):
     """
-    Main function to process the input URL:
-      - Fetch and extract text from the URL (PDF or HTML).
-      - Preprocess the text.
-      - Generate summaries using ChatGPT.
-      - Process the full text into JSON.
-      - All files are saved in a dedicated folder based on the URL.
+    Main function to process the input (URL or raw text):
+      - If input is a URL, fetch and extract text.
+      - If input is raw text, process it directly.
+      - Generate summaries and JSON structure.
     Returns a dictionary with the model used and the generated summaries.
     """
     try:
         processor = TextProcessor(model=model)
-        logging.info(f"Processing input: {input_link}")
-        result = processor.extract_text_from_url(input_link)
+        logging.info(f"Processing input: {input_data}")
 
-        # Handle error cases such as Google Cache links, blank PDFs, or unsupported types.
-        if result["error"] == "google_cache":
-            return {"error": "Skipping Google Cache link - no summary generated", "model": model}
-        if result["content_type"] == "pdf" and result["error"] == "blank_pdf":
-            return {"error": "Link doesn't have content to summarize - blank PDF", "model": model}
-        if not result["text"]:
-            return {"error": f"Error processing content: {result.get('error', 'Unknown error')}", "model": model}
+        if input_data.startswith(("http://", "https://")):
+            # Process as a URL
+            result = processor.extract_text_from_url(input_data)
 
-        clean_text = processor.preprocess_text(result["text"])
+            # Handle error cases such as Google Cache links, blank PDFs, or unsupported types.
+            if result["error"] == "google_cache":
+                return {"error": "Skipping Google Cache link - no summary generated", "model": model}
+            if result["content_type"] == "pdf" and result["error"] == "blank_pdf":
+                return {"error": "Link doesn't have content to summarize - blank PDF", "model": model}
+            if not result["text"]:
+                return {"error": f"Error processing content: {result.get('error', 'Unknown error')}", "model": model}
+
+            clean_text = processor.preprocess_text(result["text"])
+            base_name = processor.get_base_name_from_link(input_data)
+        else:
+            # Process as raw text
+            clean_text = processor.preprocess_text(input_data)
+            base_name = "raw_text"
+
         summaries = processor.generate_summaries_with_chatgpt(clean_text)
-        base_name = processor.get_base_name_from_link(input_link)
         processor.process_full_text_to_json(clean_text, base_name)
 
         return {

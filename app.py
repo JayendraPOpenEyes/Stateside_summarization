@@ -5,6 +5,7 @@ import subprocess
 from io import BytesIO
 import logging
 import re
+from PyPDF2 import PdfReader
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -42,9 +43,17 @@ def format_highlights(highlights_text):
     
     return formatted_text
 
+def extract_text_from_pdf(pdf_file):
+    """Extract text from a PDF file."""
+    pdf_reader = PdfReader(pdf_file)
+    text = ""
+    for page in pdf_reader.pages:
+        text += page.extract_text()
+    return text
+
 def main():
     st.title("Stateside Bill Summarization")
-    st.write("Enter a URL of Stateside bill to summarize its content or upload an Excel file.")
+    st.write("Enter a URL of Stateside bill to summarize its content, upload an Excel file, or upload a PDF file.")
 
     # Initialize session state for persistent data
     if 'processed_df' not in st.session_state:
@@ -109,10 +118,6 @@ def main():
                 if col not in st.session_state.processed_df.columns:
                     st.session_state.processed_df[col] = ''
 
-            # Uncomment the following lines to add the 'Model' column and write the model name
-            # if 'Model' not in st.session_state.processed_df.columns:
-            #     st.session_state.processed_df['Model'] = ''
-
         df = st.session_state.processed_df
         
         if 'BillState' not in df.columns or 'BillTextURL' not in df.columns:
@@ -133,16 +138,12 @@ def main():
                                 
                                 if isinstance(result, dict) and "error" in result:
                                     st.warning(f"{status_msg} - Can't generate summary")
-                                    # Uncomment the following line to write the model name
-                                    # df.at[index, 'Model'] = result.get('model', 'gpt-4')
                                     df.at[index, 'Extractive Summary'] = "Error"
                                     df.at[index, 'Abstractive Summary'] = "Error"
                                     df.at[index, 'Highlights & Analysis'] = "Error"
                                 else:
                                     st.success(f"{status_msg} - Completed")
                                     
-                                    # Uncomment the following line to write the model name
-                                    # df.at[index, 'Model'] = result.get('model', 'gpt-4')
                                     df.at[index, 'Extractive Summary'] = result.get('extractive', 'Error')
                                     df.at[index, 'Abstractive Summary'] = result.get('abstractive', 'Error')
                                     highlights = format_highlights(result.get('highlights', 'Error'))
@@ -151,8 +152,6 @@ def main():
                             except Exception as e:
                                 logging.error(f"Error processing {url}: {str(e)}")
                                 st.warning(f"{status_msg} - Can't generate summary")
-                                # Uncomment the following line to write the model name
-                                # df.at[index, 'Model'] = "Error"
                                 df.at[index, 'Extractive Summary'] = "Error"
                                 df.at[index, 'Abstractive Summary'] = "Error"
                                 df.at[index, 'Highlights & Analysis'] = "Error"
@@ -191,21 +190,17 @@ def main():
                             st.write("---")
 
             # Download button
-            # Ensure the file name is derived from the uploaded file
             if st.session_state.processing_complete and st.session_state.processed_df is not None:
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     st.session_state.processed_df.to_excel(writer, index=False)
 
-                # Extract the last 7 characters from the uploaded file name (excluding the extension)
                 original_filename = st.session_state.prev_upload
                 base_name = original_filename.rsplit('.', 1)[0]  # Remove extension
                 last_7_chars = base_name[-7:] if len(base_name) >= 7 else base_name
 
-                # Format the final filename
                 processed_filename = f"{last_7_chars}_summarized.xlsx"
 
-                # Provide download button with the new name
                 st.download_button(
                     label="Download Updated Excel",
                     data=output.getvalue(),
@@ -214,6 +209,46 @@ def main():
                     key='download_btn'
                 )
 
+    # PDF file processing
+    uploaded_pdf = st.file_uploader("Upload PDF File", type=["pdf"])
+    
+    if uploaded_pdf is not None:
+        with st.spinner('Extracting text from PDF...'):
+            pdf_text = extract_text_from_pdf(uploaded_pdf)
+            st.success("Ready to Summarize PDF!")
+
+        if st.button("Summarize PDF"):
+            with st.spinner('Processing PDF...'):
+                result = process_input(pdf_text)
+                if isinstance(result, dict) and "error" in result:
+                    st.warning(f"Failed to process PDF: {result['error']}")
+                elif isinstance(result, dict):
+                    st.success("Summarization complete!") 
+                    st.session_state.all_summaries[uploaded_pdf.name] = {
+                        "abstractive": result["abstractive"],
+                        "extractive": result["extractive"],
+                        "highlights": format_highlights(result["highlights"])
+                    }
+                else:
+                    st.error("An unexpected error occurred.")
+
+        # Display PDF summaries
+        if uploaded_pdf.name in st.session_state.all_summaries:
+            summaries = st.session_state.all_summaries[uploaded_pdf.name]
+            with st.expander(f"Summary for {uploaded_pdf.name}", expanded=True):
+                if summaries["extractive"].strip() == "Extractive summary not found.":
+                    st.warning("Could not generate extractive summary")
+                else:
+                    st.subheader("Extractive Summary")
+                    st.markdown(summaries["extractive"])
+                
+                st.subheader("Abstractive Summary")
+                st.markdown(summaries["abstractive"])
+                
+                st.subheader("Highlights & Analysis")
+                st.markdown(summaries["highlights"])
+                
+                st.write("---")
 
 if __name__ == "__main__":
     main()
