@@ -37,14 +37,11 @@ def format_highlights(highlights_text):
         formatted_text = highlights_text.replace("•", "-").replace("—", "--")
     else:
         formatted_text = highlights_text
-    
-    # Remove Markdown bold formatting before saving to Excel
-    formatted_text = re.sub(r'\*\*(.*?)\*\*', r'\1', formatted_text)  # Removes **bold** formatting
-    
+    formatted_text = re.sub(r'\*\*(.*?)\*\*', r'\1', formatted_text)
     return formatted_text
 
 def extract_text_from_pdf(pdf_file):
-    """Extract text from a PDF file."""
+    """Extract text from a PDF file using PyPDF2 (for fallback purposes)."""
     pdf_reader = PdfReader(pdf_file)
     text = ""
     for page in pdf_reader.pages:
@@ -53,7 +50,7 @@ def extract_text_from_pdf(pdf_file):
 
 def main():
     st.title("Stateside Bill Summarization")
-    st.write("Enter a URL of Stateside bill to summarize its content, upload an Excel file, or upload a PDF file.")
+    st.write("Enter a URL of a Stateside bill to summarize its content, upload an Excel file, or upload a PDF file.")
 
     # Initialize session state for persistent data
     if 'processed_df' not in st.session_state:
@@ -74,7 +71,7 @@ def main():
                 if isinstance(result, dict) and "error" in result:
                     st.warning(f"Failed to process URL: {result['error']}")
                 elif isinstance(result, dict):
-                    st.success("Summarization complete!") 
+                    st.success("Summarization complete!")
                     st.session_state.all_summaries[url] = {
                         "abstractive": result["abstractive"],
                         "extractive": result["extractive"],
@@ -85,7 +82,7 @@ def main():
         else:
             st.error("Please enter a valid URL.")
 
-    # Display URL summaries with improved formatting
+    # Display URL summaries
     if st.session_state.all_summaries:
         st.subheader("URL Summaries")
         for url, summaries in st.session_state.all_summaries.items():
@@ -95,31 +92,24 @@ def main():
                 else:
                     st.subheader("Extractive Summary")
                     st.markdown(summaries["extractive"])
-                
                 st.subheader("Abstractive Summary")
                 st.markdown(summaries["abstractive"])
-                
                 st.subheader("Highlights & Analysis")
                 st.markdown(summaries["highlights"])
-                
                 st.write("---")
 
     # Excel file processing
     uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx", "xls"])
-    
     if uploaded_file is not None:
         if st.session_state.prev_upload != uploaded_file.name:
             st.session_state.processed_df = pd.read_excel(uploaded_file)
             st.session_state.prev_upload = uploaded_file.name
             st.session_state.processing_complete = False
             st.session_state.all_summaries = {}
-            
             for col in ['Extractive Summary', 'Abstractive Summary', 'Highlights & Analysis']:
                 if col not in st.session_state.processed_df.columns:
                     st.session_state.processed_df[col] = ''
-
         df = st.session_state.processed_df
-        
         if 'BillState' not in df.columns or 'BillTextURL' not in df.columns:
             st.error("File must contain 'BillState' and 'BillTextURL' columns")
         else:
@@ -127,7 +117,6 @@ def main():
                 with st.spinner('Processing URLs... This may take several minutes'):
                     total_urls = len(df['BillTextURL'].dropna())
                     processed_count = 0
-                    
                     for index, row in df.iterrows():
                         url = row['BillTextURL']
                         if pd.notna(url) and df.at[index, 'Extractive Summary'] == '':
@@ -135,7 +124,6 @@ def main():
                             try:
                                 result = process_input(url)
                                 status_msg = f"Processing URL {processed_count}/{total_urls}: {url}"
-                                
                                 if isinstance(result, dict) and "error" in result:
                                     st.warning(f"{status_msg} - Can't generate summary")
                                     df.at[index, 'Extractive Summary'] = "Error"
@@ -143,36 +131,27 @@ def main():
                                     df.at[index, 'Highlights & Analysis'] = "Error"
                                 else:
                                     st.success(f"{status_msg} - Completed")
-                                    
                                     df.at[index, 'Extractive Summary'] = result.get('extractive', 'Error')
                                     df.at[index, 'Abstractive Summary'] = result.get('abstractive', 'Error')
                                     highlights = format_highlights(result.get('highlights', 'Error'))
                                     df.at[index, 'Highlights & Analysis'] = highlights
-
                             except Exception as e:
-                                logging.error(f"Error processing {url}: {str(e)}")
                                 st.warning(f"{status_msg} - Can't generate summary")
                                 df.at[index, 'Extractive Summary'] = "Error"
                                 df.at[index, 'Abstractive Summary'] = "Error"
                                 df.at[index, 'Highlights & Analysis'] = "Error"
                                 continue
-
                     st.session_state.processed_df = df
                     st.session_state.processing_complete = True
-
                 st.success("Processing complete! You can now download the file.")
-
-            # Display summaries from uploaded Excel file
             if st.session_state.processing_complete and st.session_state.processed_df is not None:
                 st.subheader("Summaries from Excel File")
                 df = st.session_state.processed_df
-                
                 for index, row in df.iterrows():
                     url = row.get("BillTextURL", "")
                     extractive_summary = row.get("Extractive Summary", "No summary available")
                     abstractive_summary = row.get("Abstractive Summary", "No summary available")
                     highlights = row.get("Highlights & Analysis", "No highlights available")
-
                     if pd.notna(url) and url.strip():
                         with st.expander(f"Summary for {url}", expanded=False):
                             if extractive_summary.strip() == "Error":
@@ -180,27 +159,19 @@ def main():
                             else:
                                 st.subheader("Extractive Summary")
                                 st.markdown(extractive_summary)
-                            
                             st.subheader("Abstractive Summary")
                             st.markdown(abstractive_summary)
-                            
                             st.subheader("Highlights & Analysis")
                             st.markdown(highlights)
-                            
                             st.write("---")
-
-            # Download button
             if st.session_state.processing_complete and st.session_state.processed_df is not None:
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     st.session_state.processed_df.to_excel(writer, index=False)
-
                 original_filename = st.session_state.prev_upload
-                base_name = original_filename.rsplit('.', 1)[0]  # Remove extension
+                base_name = original_filename.rsplit('.', 1)[0]
                 last_7_chars = base_name[-7:] if len(base_name) >= 7 else base_name
-
                 processed_filename = f"{last_7_chars}_summarized.xlsx"
-
                 st.download_button(
                     label="Download Updated Excel",
                     data=output.getvalue(),
@@ -211,19 +182,16 @@ def main():
 
     # PDF file processing
     uploaded_pdf = st.file_uploader("Upload PDF File", type=["pdf"])
-    
     if uploaded_pdf is not None:
-        with st.spinner('Extracting text from PDF...'):
-            pdf_text = extract_text_from_pdf(uploaded_pdf)
-            st.success("Ready to Summarize PDF!")
-
+        st.success("PDF file uploaded successfully!")
         if st.button("Summarize PDF"):
             with st.spinner('Processing PDF...'):
-                result = process_input(pdf_text)
+                # Pass the uploaded file object directly to process_input
+                result = process_input(uploaded_pdf)
                 if isinstance(result, dict) and "error" in result:
                     st.warning(f"Failed to process PDF: {result['error']}")
                 elif isinstance(result, dict):
-                    st.success("Summarization complete!") 
+                    st.success("Summarization complete!")
                     st.session_state.all_summaries[uploaded_pdf.name] = {
                         "abstractive": result["abstractive"],
                         "extractive": result["extractive"],
@@ -231,8 +199,6 @@ def main():
                     }
                 else:
                     st.error("An unexpected error occurred.")
-
-        # Display PDF summaries
         if uploaded_pdf.name in st.session_state.all_summaries:
             summaries = st.session_state.all_summaries[uploaded_pdf.name]
             with st.expander(f"Summary for {uploaded_pdf.name}", expanded=True):
@@ -241,13 +207,10 @@ def main():
                 else:
                     st.subheader("Extractive Summary")
                     st.markdown(summaries["extractive"])
-                
                 st.subheader("Abstractive Summary")
                 st.markdown(summaries["abstractive"])
-                
                 st.subheader("Highlights & Analysis")
                 st.markdown(summaries["highlights"])
-                
                 st.write("---")
 
 if __name__ == "__main__":
