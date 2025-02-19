@@ -14,7 +14,7 @@ from openai import OpenAI
 import pytesseract  # For OCR
 
 # Load environment variables from .env file
-load_dotenv()
+# load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
