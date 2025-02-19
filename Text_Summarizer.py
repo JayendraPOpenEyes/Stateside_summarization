@@ -290,15 +290,22 @@ Text:
 def process_input(input_data, model="gpt-4o-mini"):
     try:
         processor = TextProcessor(model=model)
-        if hasattr(input_data, "read") and not isinstance(input_data, str):
+        # If input_data has a 'read' method, assume it's a file-like object.
+        if hasattr(input_data, "read"):
             file_identifier = input_data.name if hasattr(input_data, "name") else "uploaded_file"
             logging.info(f"Processing uploaded file: {file_identifier}")
             _, ext = os.path.splitext(file_identifier)
             ext = ext.lower()
             if ext in [".htm", ".html"]:
-                result = processor.process_uploaded_html(input_data, base_name=file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier)
+                result = processor.process_uploaded_html(
+                    input_data,
+                    base_name=file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier
+                )
             elif ext == ".pdf":
-                result = processor.process_uploaded_pdf(input_data, base_name=file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier)
+                result = processor.process_uploaded_pdf(
+                    input_data,
+                    base_name=file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier
+                )
             else:
                 result = {"text": input_data.read(), "content_type": "raw", "error": None}
             if result["error"]:
