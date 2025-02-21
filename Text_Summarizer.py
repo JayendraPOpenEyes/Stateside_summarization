@@ -1,20 +1,27 @@
 import os
 import re
-import requests
 import io
-import logging
 import json
+import time
+import hashlib
+import logging
+import asyncio
+import aiohttp
+from concurrent.futures import ThreadPoolExecutor
+
+import requests
+import pdfkit
+import tiktoken
 from bs4 import BeautifulSoup
 from PIL import Image
 from pdf2image import convert_from_bytes
 from dotenv import load_dotenv
-import pdfkit
-import tiktoken
-from openai import OpenAI
 import pytesseract  # For OCR
+import fitz  # PyMuPDF for native PDF text extraction
+from openai import OpenAI
 
 # Load environment variables from .env file
-# load_dotenv()
+#load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -60,17 +67,44 @@ class TextProcessor:
             logging.error(f"Error processing image with Tesseract: {str(e)}")
             return ""
 
+    def extract_text_from_pdf_native(self, pdf_bytes):
+        """Try to extract text natively using PyMuPDF."""
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            text = ""
+            for page in doc:
+                text += page.get_text() + "\n"
+            return text.strip()
+        except Exception as e:
+            logging.error("Error in native PDF extraction: " + str(e))
+            return ""
+
     def extract_text_from_pdf(self, pdf_content, link):
         base_name = self.get_base_name_from_link(link)
         folder = self.get_save_directory(base_name)
-        images = convert_from_bytes(pdf_content.read())
+        # Read PDF bytes once so we can reuse them
+        pdf_bytes = pdf_content.read()
+        # Attempt native extraction first
+        native_text = self.extract_text_from_pdf_native(pdf_bytes)
+        if native_text and not self.is_blank_text(native_text):
+            logging.info("Native PDF text extraction succeeded.")
+            return native_text
+        # Fallback to OCR using in-memory images
+        images = convert_from_bytes(pdf_bytes)
+        logging.info(f"OCR fallback: converting {len(images)} pages to images.")
         combined_text = ""
-        for i, img in enumerate(images):
+
+        def process_page(i, img):
             img_filename = f"{base_name}_page_{i+1}.png"
             img_path = os.path.join(folder, img_filename)
             img.save(img_path, 'PNG')
             logging.info(f"Saved image: {img_path}")
-            combined_text += self.process_image_with_tesseract(img_path) + "\n"
+            return self.process_image_with_tesseract(img_path)
+
+        with ThreadPoolExecutor() as executor:
+            results = executor.map(lambda x: process_page(x[0], x[1]), enumerate(images))
+            for text in results:
+                combined_text += text + "\n"
         return combined_text
 
     def extract_text_from_html(self, html_content):
@@ -79,33 +113,37 @@ class TextProcessor:
             tag.decompose()
         return soup.get_text(separator=' ').strip()
 
-    def extract_text_from_url(self, url):
+    async def async_extract_text_from_url(self, url):
+        """Asynchronously fetches and processes a URL."""
+        if self.is_google_cache_link(url):
+            return {"text": "", "content_type": None, "error": "google_cache"}
         try:
-            if self.is_google_cache_link(url):
-                return {"text": "", "content_type": None, "error": "google_cache"}
-            response = requests.get(url)
-            response.raise_for_status()
-            content_type = response.headers.get('Content-Type', '').lower()
-            base_name = self.get_base_name_from_link(url)
-            folder = self.get_save_directory(base_name)
-            if url.lower().endswith('.pdf') or 'application/pdf' in content_type:
-                pdf_path = os.path.join(folder, f"{base_name}.pdf")
-                with open(pdf_path, 'wb') as f:
-                    f.write(response.content)
-                logging.info(f"Saved PDF: {pdf_path}")
-                text = self.extract_text_from_pdf(io.BytesIO(response.content), url)
-                if self.is_blank_text(text):
-                    return {"text": "", "content_type": "pdf", "error": "blank_pdf"}
-                return {"text": text, "content_type": "pdf", "error": None}
-            elif url.lower().endswith(('.htm', '.html')) or 'text/html' in content_type:
-                html_path = os.path.join(folder, f"{base_name}.html")
-                with open(html_path, 'wb') as f:
-                    f.write(response.content)
-                logging.info(f"Saved HTML: {html_path}")
-                text = self.extract_text_from_html(response.content)
-                return {"text": text, "content_type": "html", "error": None}
-            else:
-                return {"text": "", "content_type": None, "error": "unsupported_type"}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        return {"text": "", "content_type": None, "error": f"HTTP error {response.status}"}
+                    content_type = response.headers.get('Content-Type', '').lower()
+                    content = await response.read()
+                    base_name = self.get_base_name_from_link(url)
+                    folder = self.get_save_directory(base_name)
+                    if url.lower().endswith('.pdf') or 'application/pdf' in content_type:
+                        pdf_path = os.path.join(folder, f"{base_name}.pdf")
+                        with open(pdf_path, 'wb') as f:
+                            f.write(content)
+                        logging.info(f"Saved PDF: {pdf_path}")
+                        text = self.extract_text_from_pdf(io.BytesIO(content), url)
+                        if self.is_blank_text(text):
+                            return {"text": "", "content_type": "pdf", "error": "blank_pdf"}
+                        return {"text": text, "content_type": "pdf", "error": None}
+                    elif url.lower().endswith(('.htm', '.html')) or 'text/html' in content_type:
+                        html_path = os.path.join(folder, f"{base_name}.html")
+                        with open(html_path, 'wb') as f:
+                            f.write(content)
+                        logging.info(f"Saved HTML: {html_path}")
+                        text = self.extract_text_from_html(content)
+                        return {"text": text, "content_type": "html", "error": None}
+                    else:
+                        return {"text": "", "content_type": None, "error": "unsupported_type"}
         except Exception as e:
             logging.error(f"Error fetching URL {url}: {str(e)}")
             return {"text": "", "content_type": None, "error": str(e)}
@@ -120,16 +158,26 @@ class TextProcessor:
             with open(pdf_path, 'wb') as f:
                 f.write(pdf_bytes)
             logging.info(f"Saved uploaded PDF: {pdf_path}")
-            pdf_io = io.BytesIO(pdf_bytes)
-            images = convert_from_bytes(pdf_io.read())
-            logging.info(f"Converted {len(images)} page(s) to images.")
+            # Attempt native extraction first; fallback to OCR if needed
+            native_text = self.extract_text_from_pdf_native(pdf_bytes)
+            if native_text and not self.is_blank_text(native_text):
+                return {"text": native_text, "content_type": "pdf", "error": None}
+            # If native extraction fails, use OCR in parallel
+            images = convert_from_bytes(pdf_bytes)
+            logging.info(f"OCR fallback: converting {len(images)} page(s) to images.")
             combined_text = ""
-            for i, img in enumerate(images):
+
+            def process_page(i, img):
                 img_filename = f"{base_name}_page_{i+1}.png"
                 img_path = os.path.join(folder, img_filename)
                 img.save(img_path, 'PNG')
                 logging.info(f"Saved image: {img_path}")
-                combined_text += self.process_image_with_tesseract(img_path) + "\n"
+                return self.process_image_with_tesseract(img_path)
+
+            with ThreadPoolExecutor() as executor:
+                results = executor.map(lambda x: process_page(x[0], x[1]), enumerate(images))
+                for text in results:
+                    combined_text += text + "\n"
             if self.is_blank_text(combined_text):
                 return {"text": "", "content_type": "pdf", "error": "blank_pdf"}
             return {"text": combined_text, "content_type": "pdf", "error": None}
@@ -159,56 +207,35 @@ class TextProcessor:
         text = re.sub(r"\s{2,}", " ", text)
         return text.strip()
 
-    def generate_html_structure(self, text):
+    def generate_structured_json(self, text):
+        """
+        Streamlined generation of JSON structure directly from text.
+        Splits the text into paragraphs. Paragraphs with >10 words are added under 'p',
+        otherwise they are added under 'h1'.
+        """
         paragraphs = text.split('\n')
-        html = ""
+        json_data = {"h1": [], "p": []}
         for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
             if len(para.split()) > 10:
-                html += f"<p>{para.strip()}</p>\n"
+                json_data["p"].append(para)
             else:
-                html += f"<h1>{para.strip()}</h1>\n"
-        return html
+                json_data["h1"].append(para)
+        return json_data
 
-    def generate_json_with_prompt(self, html, base_name):
-        soup = BeautifulSoup(html, 'html.parser')
-        text = soup.get_text(separator=' ').strip()
-        # Updated prompt: instruct the model not to summarize or omit details.
-        prompt = (
-            "Convert the following text into a structured JSON format with keys 'h1' and 'p'.\n"
-            "Do not summarize or omit any details; preserve the entire text structure.\n"
-            "Return only the JSON enclosed in triple backticks, with no extra commentary.\n\n" + text
-        )
+    def process_full_text_to_json(self, text, base_name):
+        json_data = self.generate_structured_json(text)
+        base_folder = self.get_save_directory(base_name)
+        json_path = os.path.join(base_folder, f"{base_name}.json")
         try:
-            response = self.openai_client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=2000,  # Increased to allow more output
-            )
-            json_output = response.choices[0].message.content.strip()
-            json_output = re.sub(r"^```(?:json)?\s*", "", json_output)
-            json_output = re.sub(r"\s*```$", "", json_output)
-            try:
-                json_data = json.loads(json_output)
-            except json.JSONDecodeError:
-                json_match = re.search(r'(\{.*\})', json_output, re.DOTALL)
-                if json_match:
-                    try:
-                        json_data = json.loads(json_match.group(1))
-                    except json.JSONDecodeError:
-                        logging.error("Invalid JSON from OpenAI after regex extraction.")
-                        return {}
-                else:
-                    logging.error("OpenAI response is not valid JSON format.")
-                    return {}
-            base_folder = self.get_save_directory(base_name)
-            json_path = os.path.join(base_folder, f"{base_name}.json")
             with open(json_path, 'w') as json_file:
                 json.dump(json_data, json_file, indent=4)
             logging.info(f"Saved JSON: {json_path}")
-            return json_data
         except Exception as e:
-            logging.error(f"Error generating JSON with OpenAI: {str(e)}")
-            return {}
+            logging.error(f"Error saving JSON: {str(e)}")
+        return json_data
 
     def truncate_text(self, text, max_tokens=3000):
         encoding = tiktoken.encoding_for_model(self.model)
@@ -223,14 +250,18 @@ class TextProcessor:
 Generate the following summaries for the text below. Please adhere to these instructions:
 
 For Abstractive Summary:
-- Provide a concise summary in one short paragraph (maximum 8 sentences).
+- The summary should be concise and not very long.
+- It should cover all the key points very shortly.
+- Summarize the content in one short paragraph (maximum 8 sentences).
 
 For Extractive Summary:
-- Provide a summary capturing the main ideas in at least 2 paragraphs if possible.
+- Generate a minimum of 2 paragraphs if the content is sufficiently long; adjust accordingly if the content is short.
+- Provide a sensible extractive summary capturing the main ideas.
 
 For Highlights & Analysis:
-- Provide 15 to 20 bullet points grouped under 4 meaningful headings.
-- Each heading should be followed by bullet points of key details.
+- Produce 15 to 20 bullet points grouped under 4 meaningful headings.
+- Each heading should be relevant to the content and include bullet points with key details.
+- Highlights should be in the form of headings only, followed by bullet points.
 
 Use the following markers exactly for each section:
 
@@ -272,14 +303,52 @@ Text:
                 "highlights": "Error generating highlights."
             }
 
-    def process_full_text_to_json(self, text, base_name):
-        html = self.generate_html_structure(text)
-        return self.generate_json_with_prompt(html, base_name)
+    # Caching methods
+    def get_hash(self, text):
+        return hashlib.md5(text.encode('utf-8')).hexdigest()
+
+    def get_cache_file_path(self, base_name):
+        folder = self.get_save_directory(base_name)
+        return os.path.join(folder, "summary_cache.json")
+
+    def get_cached_summary(self, text, base_name, cache_expiry=3600):
+        cache_file = self.get_cache_file_path(base_name)
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'r') as f:
+                    cache = json.load(f)
+                # Check cache expiry and hash
+                if time.time() - cache.get("timestamp", 0) < cache_expiry and cache.get("text_hash") == self.get_hash(text):
+                    logging.info("Returning cached summary.")
+                    return cache.get("summary")
+            except Exception as e:
+                logging.error("Error reading cache: " + str(e))
+        return None
+
+    def update_cached_summary(self, text, summary, base_name):
+        cache_file = self.get_cache_file_path(base_name)
+        cache = {
+            "text_hash": self.get_hash(text),
+            "summary": summary,
+            "timestamp": time.time()
+        }
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump(cache, f)
+            logging.info("Cache updated.")
+        except Exception as e:
+            logging.error("Error writing cache: " + str(e))
 
     def process_raw_text(self, text, base_name="raw_text"):
         clean_text = self.preprocess_text(text)
+        # Check for cached summary first
+        cached_summary = self.get_cached_summary(clean_text, base_name)
+        if cached_summary:
+            return cached_summary
         summaries = self.generate_summaries_with_chatgpt(clean_text)
         self.process_full_text_to_json(clean_text, base_name)
+        # Update cache
+        self.update_cached_summary(clean_text, summaries, base_name)
         return {
             "model": self.model,
             "extractive": summaries["extractive"],
@@ -290,22 +359,15 @@ Text:
 def process_input(input_data, model="gpt-4o-mini"):
     try:
         processor = TextProcessor(model=model)
-        # If input_data has a 'read' method, assume it's a file-like object.
-        if hasattr(input_data, "read"):
+        if hasattr(input_data, "read") and not isinstance(input_data, str):
             file_identifier = input_data.name if hasattr(input_data, "name") else "uploaded_file"
             logging.info(f"Processing uploaded file: {file_identifier}")
             _, ext = os.path.splitext(file_identifier)
             ext = ext.lower()
             if ext in [".htm", ".html"]:
-                result = processor.process_uploaded_html(
-                    input_data,
-                    base_name=file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier
-                )
+                result = processor.process_uploaded_html(input_data, base_name=file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier)
             elif ext == ".pdf":
-                result = processor.process_uploaded_pdf(
-                    input_data,
-                    base_name=file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier
-                )
+                result = processor.process_uploaded_pdf(input_data, base_name=file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier)
             else:
                 result = {"text": input_data.read(), "content_type": "raw", "error": None}
             if result["error"]:
@@ -313,7 +375,8 @@ def process_input(input_data, model="gpt-4o-mini"):
             clean_text = processor.preprocess_text(result["text"])
             base_name = file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier
         elif isinstance(input_data, str) and input_data.startswith(("http://", "https://")):
-            result = processor.extract_text_from_url(input_data)
+            # Use asynchronous URL fetching
+            result = asyncio.run(processor.async_extract_text_from_url(input_data))
             if result["error"]:
                 return {"error": result["error"], "model": model}
             clean_text = processor.preprocess_text(result["text"])
@@ -323,8 +386,16 @@ def process_input(input_data, model="gpt-4o-mini"):
             base_name = "raw_text"
         else:
             return {"error": "Invalid input type. Expected URL, raw text, or an uploaded file.", "model": model}
+
+        # Check cache for summaries to avoid unnecessary API calls if content hasn't changed
+        cached_summary = processor.get_cached_summary(clean_text, base_name)
+        if cached_summary:
+            return cached_summary
+
         summaries = processor.generate_summaries_with_chatgpt(clean_text)
         processor.process_full_text_to_json(clean_text, base_name)
+        # Update cache with new summary
+        processor.update_cached_summary(clean_text, summaries, base_name)
         return {
             "model": model,
             "extractive": summaries["extractive"],

@@ -117,13 +117,14 @@ def main():
                 with st.spinner('Processing URLs... This may take several minutes'):
                     total_urls = len(df['BillTextURL'].dropna())
                     processed_count = 0
+                    progress_bar = st.progress(0)
                     for index, row in df.iterrows():
                         url = row['BillTextURL']
                         if pd.notna(url) and df.at[index, 'Extractive Summary'] == '':
                             processed_count += 1
+                            status_msg = f"Processing URL {processed_count}/{total_urls}: {url}"
                             try:
                                 result = process_input(url)
-                                status_msg = f"Processing URL {processed_count}/{total_urls}: {url}"
                                 if isinstance(result, dict) and "error" in result:
                                     st.warning(f"{status_msg} - Can't generate summary")
                                     df.at[index, 'Extractive Summary'] = "Error"
@@ -141,6 +142,7 @@ def main():
                                 df.at[index, 'Abstractive Summary'] = "Error"
                                 df.at[index, 'Highlights & Analysis'] = "Error"
                                 continue
+                            progress_bar.progress(processed_count / total_urls)
                     st.session_state.processed_df = df
                     st.session_state.processing_complete = True
                 st.success("Processing complete! You can now download the file.")
