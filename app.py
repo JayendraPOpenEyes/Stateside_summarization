@@ -1,14 +1,15 @@
 import streamlit as st
 import pandas as pd
-from Text_Summarizer import process_input
+from local_Text_Summarizer import process_input
 import subprocess
 from io import BytesIO
 import logging
 import re
 from PyPDF2 import PdfReader
+import time  # For introducing delays
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Configure logging at WARNING level to avoid INFO-level logs (like raw JSON outputs)
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def check_poppler_installed():
     """Check if Poppler is installed and accessible."""
@@ -33,12 +34,16 @@ check_poppler_installed()
 
 def format_highlights(highlights_text):
     """Convert plain text highlights to formatted markdown for display and remove Markdown for saving."""
-    if "•" in highlights_text or "-" in highlights_text:
-        formatted_text = highlights_text.replace("•", "-").replace("—", "--")
-    else:
-        formatted_text = highlights_text
-    formatted_text = re.sub(r'\*\*(.*?)\*\*', r'\1', formatted_text)
-    return formatted_text
+    # Remove markdown headers (e.g., "# Heading" or "## Subheading")
+    highlights_text = re.sub(r'#{1,6}\s*', '', highlights_text)  
+    
+    # Replace bullet points with hyphens for consistency
+    highlights_text = highlights_text.replace("•", "-").replace("—", "--")
+
+    # Remove bold formatting (**text** -> text)
+    highlights_text = re.sub(r'\*\*(.*?)\*\*', r'\1', highlights_text)  
+    
+    return highlights_text
 
 def extract_text_from_pdf(pdf_file):
     """Extract text from a PDF file using PyPDF2 (for fallback purposes)."""
@@ -47,6 +52,45 @@ def extract_text_from_pdf(pdf_file):
     for page in pdf_reader.pages:
         text += page.extract_text()
     return text
+
+def typewriter_effect(text, placeholder, delay=0.005):
+    """Simulate a typewriter effect by displaying text character by character."""
+    display_text = ""
+    for char in text:
+        display_text += char
+        placeholder.markdown(display_text)
+        time.sleep(delay)  # Adjust delay for speed
+
+def display_summary(summary, url, use_typewriter=False):
+    """Display the summary in a structured format with optional typewriter effect."""
+    with st.expander(f"Summary for {url}", expanded=True):
+        # Extractive Summary
+        st.subheader("Extractive Summary")
+        if summary["extractive"].strip() == "Extractive summary not found.":
+            st.warning("Could not generate extractive summary")
+        elif use_typewriter:
+            placeholder = st.empty()
+            typewriter_effect(summary["extractive"], placeholder)
+        else:
+            st.markdown(summary["extractive"])
+
+        # Abstractive Summary
+        st.subheader("Abstractive Summary")
+        if use_typewriter:
+            placeholder = st.empty()
+            typewriter_effect(summary["abstractive"], placeholder)
+        else:
+            st.markdown(summary["abstractive"])
+
+        # Highlights & Analysis
+        st.subheader("Highlights & Analysis")
+        if use_typewriter:
+            placeholder = st.empty()
+            typewriter_effect(summary["highlights"], placeholder)
+        else:
+            st.markdown(summary["highlights"])
+
+        st.write("---")
 
 def main():
     st.title("Stateside Bill Summarization")
@@ -61,6 +105,8 @@ def main():
         st.session_state.processing_complete = False
     if 'all_summaries' not in st.session_state:
         st.session_state.all_summaries = {}
+    if 'last_processed_url' not in st.session_state:
+        st.session_state.last_processed_url = ""
 
     # Individual URL processing
     url = st.text_input("Enter URL")
@@ -77,26 +123,20 @@ def main():
                         "extractive": result["extractive"],
                         "highlights": format_highlights(result["highlights"])
                     }
+                    st.session_state.last_processed_url = url
+                    # Display immediately with typewriter effect
+                    display_summary(st.session_state.all_summaries[url], url, use_typewriter=True)
                 else:
                     st.error("An unexpected error occurred.")
         else:
             st.error("Please enter a valid URL.")
 
-    # Display URL summaries
+    # Display URL summaries (without typewriter effect for previously processed URLs)
     if st.session_state.all_summaries:
         st.subheader("URL Summaries")
         for url, summaries in st.session_state.all_summaries.items():
-            with st.expander(f"Summary for {url}", expanded=True):
-                if summaries["extractive"].strip() == "Extractive summary not found.":
-                    st.warning("Could not generate extractive summary")
-                else:
-                    st.subheader("Extractive Summary")
-                    st.markdown(summaries["extractive"])
-                st.subheader("Abstractive Summary")
-                st.markdown(summaries["abstractive"])
-                st.subheader("Highlights & Analysis")
-                st.markdown(summaries["highlights"])
-                st.write("---")
+            if url != st.session_state.last_processed_url:  # Avoid duplicating last processed
+                display_summary(summaries, url)
 
     # Excel file processing
     uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx", "xls"])
@@ -117,14 +157,13 @@ def main():
                 with st.spinner('Processing URLs... This may take several minutes'):
                     total_urls = len(df['BillTextURL'].dropna())
                     processed_count = 0
-                    progress_bar = st.progress(0)
                     for index, row in df.iterrows():
                         url = row['BillTextURL']
                         if pd.notna(url) and df.at[index, 'Extractive Summary'] == '':
                             processed_count += 1
-                            status_msg = f"Processing URL {processed_count}/{total_urls}: {url}"
                             try:
                                 result = process_input(url)
+                                status_msg = f"Processing URL {processed_count}/{total_urls}: {url}"
                                 if isinstance(result, dict) and "error" in result:
                                     st.warning(f"{status_msg} - Can't generate summary")
                                     df.at[index, 'Extractive Summary'] = "Error"
@@ -142,7 +181,6 @@ def main():
                                 df.at[index, 'Abstractive Summary'] = "Error"
                                 df.at[index, 'Highlights & Analysis'] = "Error"
                                 continue
-                            progress_bar.progress(processed_count / total_urls)
                     st.session_state.processed_df = df
                     st.session_state.processing_complete = True
                 st.success("Processing complete! You can now download the file.")
@@ -188,7 +226,6 @@ def main():
         st.success("PDF file uploaded successfully!")
         if st.button("Summarize PDF"):
             with st.spinner('Processing PDF...'):
-                # Pass the uploaded file object directly to process_input
                 result = process_input(uploaded_pdf)
                 if isinstance(result, dict) and "error" in result:
                     st.warning(f"Failed to process PDF: {result['error']}")
@@ -199,21 +236,14 @@ def main():
                         "extractive": result["extractive"],
                         "highlights": format_highlights(result["highlights"])
                     }
+                    st.session_state.last_processed_url = uploaded_pdf.name
+                    # Display immediately with typewriter effect
+                    display_summary(st.session_state.all_summaries[uploaded_pdf.name], uploaded_pdf.name, use_typewriter=True)
                 else:
                     st.error("An unexpected error occurred.")
-        if uploaded_pdf.name in st.session_state.all_summaries:
-            summaries = st.session_state.all_summaries[uploaded_pdf.name]
-            with st.expander(f"Summary for {uploaded_pdf.name}", expanded=True):
-                if summaries["extractive"].strip() == "Extractive summary not found.":
-                    st.warning("Could not generate extractive summary")
-                else:
-                    st.subheader("Extractive Summary")
-                    st.markdown(summaries["extractive"])
-                st.subheader("Abstractive Summary")
-                st.markdown(summaries["abstractive"])
-                st.subheader("Highlights & Analysis")
-                st.markdown(summaries["highlights"])
-                st.write("---")
+        # Show previously processed PDFs without typewriter
+        if uploaded_pdf.name in st.session_state.all_summaries and uploaded_pdf.name != st.session_state.last_processed_url:
+            display_summary(st.session_state.all_summaries[uploaded_pdf.name], uploaded_pdf.name)
 
 if __name__ == "__main__":
     main()
