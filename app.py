@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from local_Text_Summarizer import process_input
+from Text_Summarizer import process_input
 import subprocess
 from io import BytesIO
 import logging
