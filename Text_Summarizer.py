@@ -18,6 +18,7 @@ from pdf2image import convert_from_bytes
 from dotenv import load_dotenv
 import pytesseract  # For OCR
 import fitz  # PyMuPDF for native PDF text extraction
+from openai import OpenAI
 
 # Load environment variables from .env file
 load_dotenv()
@@ -30,15 +31,14 @@ SAVE_DIR = "saved_data"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 class TextProcessor:
-    def __init__(self, model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"):
-        self.together_api_key = os.getenv('TOGETHERAI_API_KEY')
-        if not self.together_api_key:
-            raise ValueError("TogetherAI API key is missing. Ensure the TOGETHERAI_API_KEY is set in the .env file.")
+    def __init__(self, model="gpt-4o-mini"):
+        self.openai_api_key = os.getenv('OPENAI_API_KEY')
+        if not self.openai_api_key:
+            raise ValueError("OpenAI API key is missing. Ensure the OPENAI_API_KEY is set in the .env file.")
+        self.openai_client = OpenAI(api_key=self.openai_api_key)
         self.model = model
 
     def get_save_directory(self, base_name):
-        if not base_name or not base_name.strip():
-            raise ValueError("Cache name must be specified")
         folder_path = os.path.join(SAVE_DIR, base_name)
         os.makedirs(folder_path, exist_ok=True)
         return folder_path
@@ -203,7 +203,11 @@ class TextProcessor:
         return text.strip()
 
     def generate_structured_json(self, text):
-        """Streamlined generation of JSON structure directly from text."""
+        """
+        Streamlined generation of JSON structure directly from text.
+        Splits the text into paragraphs. Paragraphs with >10 words are added under 'p',
+        otherwise they are added under 'h1'.
+        """
         paragraphs = text.split('\n')
         json_data = {"h1": [], "p": []}
         for para in paragraphs:
@@ -229,68 +233,59 @@ class TextProcessor:
         return json_data
 
     def truncate_text(self, text, max_tokens=3000):
-        encoding = tiktoken.get_encoding("gpt2")
+        encoding = tiktoken.encoding_for_model(self.model)
         tokens = encoding.encode(text)
         if len(tokens) > max_tokens:
             tokens = tokens[:max_tokens]
         return encoding.decode(tokens)
 
-    def generate_summaries_with_togetherai(self, combined_text, custom_prompt=None):
+    def generate_summaries_with_chatgpt(self, combined_text, custom_prompt=None):
         combined_text = self.truncate_text(combined_text, max_tokens=4000)
+        # Combine custom prompt with the extracted text
         if custom_prompt:
             prompt = f"{custom_prompt}\n\nText to process:\n{combined_text}"
         else:
             prompt = f"Summarize the following text:\n{combined_text}"
-        logging.info(f"Sending prompt to TogetherAI: {prompt[:100]}...")
+        logging.info(f"Sending prompt to OpenAI: {prompt[:100]}...")  # Log first 100 chars for debugging
         try:
-            headers = {
-                "Authorization": f"Bearer {self.together_api_key}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.5,
-                "max_tokens": 1500,
-            }
-            response = requests.post("https://api.together.ai/v1/chat/completions", headers=headers, json=payload)
-            response.raise_for_status()
-            response_data = response.json()
-            summary = response_data["choices"][0]["message"]["content"].strip()
-            logging.info(f"Received summary: {summary[:100]}...")
+            response = self.openai_client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.5,
+                max_tokens=1500,
+            )
+            summary = response.choices[0].message.content.strip()
+            logging.info(f"Received summary: {summary[:100]}...")  # Log first 100 chars of response
             return {"summary": summary}
         except Exception as e:
             logging.error(f"Error generating summary: {str(e)}")
             return {"summary": f"Error generating summary: {str(e)}"}
 
-    def get_hash(self, text, custom_prompt=None):
-        # Combine text and custom_prompt (if provided) for the hash
-        combined_input = f"{text}{custom_prompt or ''}"
-        return hashlib.md5(combined_input.encode('utf-8')).hexdigest()
+    # Caching methods
+    def get_hash(self, text):
+        return hashlib.md5(text.encode('utf-8')).hexdigest()
 
-    def get_cache_file_path(self, base_name, text_hash):
+    def get_cache_file_path(self, base_name):
         folder = self.get_save_directory(base_name)
-        return os.path.join(folder, f"{base_name}_{text_hash}_cache.json")
+        return os.path.join(folder, "summary_cache.json")
 
-    def get_cached_summary(self, text, base_name, custom_prompt=None, cache_expiry=3600):
-        text_hash = self.get_hash(text, custom_prompt)
-        cache_file = self.get_cache_file_path(base_name, text_hash)
+    def get_cached_summary(self, text, base_name, cache_expiry=3600):
+        cache_file = self.get_cache_file_path(base_name)
         if os.path.exists(cache_file):
             try:
                 with open(cache_file, 'r') as f:
                     cache = json.load(f)
-                if time.time() - cache.get("timestamp", 0) < cache_expiry and cache.get("text_hash") == text_hash:
+                if time.time() - cache.get("timestamp", 0) < cache_expiry and cache.get("text_hash") == self.get_hash(text):
                     logging.info("Returning cached summary.")
                     return cache.get("summary")
             except Exception as e:
-                logging.error(f"Error reading cache: {str(e)}")
+                logging.error("Error reading cache: " + str(e))
         return None
 
-    def update_cached_summary(self, text, summary, base_name, custom_prompt=None):
-        text_hash = self.get_hash(text, custom_prompt)
-        cache_file = self.get_cache_file_path(base_name, text_hash)
+    def update_cached_summary(self, text, summary, base_name):
+        cache_file = self.get_cache_file_path(base_name)
         cache = {
-            "text_hash": text_hash,
+            "text_hash": self.get_hash(text),
             "summary": summary,
             "timestamp": time.time()
         }
@@ -299,19 +294,19 @@ class TextProcessor:
                 json.dump(cache, f)
             logging.info("Cache updated.")
         except Exception as e:
-            logging.error(f"Error writing cache: {str(e)}")
+            logging.error("Error writing cache: " + str(e))
 
-    def process_raw_text(self, text, base_name="raw_text", custom_prompt=None):
+    def process_raw_text(self, text, base_name="raw_text"):
         clean_text = self.preprocess_text(text)
-        cached_summary = self.get_cached_summary(clean_text, base_name, custom_prompt)
+        cached_summary = self.get_cached_summary(clean_text, base_name)
         if cached_summary:
             return cached_summary
-        summary = self.generate_summaries_with_togetherai(clean_text, custom_prompt)
+        summary = self.generate_summaries_with_chatgpt(clean_text)
         self.process_full_text_to_json(clean_text, base_name)
-        self.update_cached_summary(clean_text, summary, base_name, custom_prompt)
+        self.update_cached_summary(clean_text, summary, base_name)
         return {"model": self.model, "summary": summary["summary"]}
 
-def process_input(input_data, model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free", custom_prompt=None):
+def process_input(input_data, model="gpt-4o-mini", custom_prompt=None):
     try:
         processor = TextProcessor(model=model)
         if hasattr(input_data, "read") and not isinstance(input_data, str):
@@ -320,15 +315,9 @@ def process_input(input_data, model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Fre
             _, ext = os.path.splitext(file_identifier)
             ext = ext.lower()
             if ext in [".htm", ".html"]:
-                result = processor.process_uploaded_html(
-                    input_data, 
-                    base_name=file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier
-                )
+                result = processor.process_uploaded_html(input_data, base_name=file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier)
             elif ext == ".pdf":
-                result = processor.process_uploaded_pdf(
-                    input_data, 
-                    base_name=file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier
-                )
+                result = processor.process_uploaded_pdf(input_data, base_name=file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier)
             else:
                 result = {"text": input_data.read(), "content_type": "raw", "error": None}
             if result["error"]:
@@ -347,13 +336,13 @@ def process_input(input_data, model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Fre
         else:
             return {"error": "Invalid input type. Expected URL, raw text, or an uploaded file.", "model": model}
 
-        cached_summary = processor.get_cached_summary(clean_text, base_name, custom_prompt)
+        cached_summary = processor.get_cached_summary(clean_text, base_name)
         if cached_summary:
             return cached_summary
 
-        summary = processor.generate_summaries_with_togetherai(clean_text, custom_prompt)
+        summary = processor.generate_summaries_with_chatgpt(clean_text, custom_prompt)
         processor.process_full_text_to_json(clean_text, base_name)
-        processor.update_cached_summary(clean_text, summary, base_name, custom_prompt)
+        processor.update_cached_summary(clean_text, summary, base_name)
         return {"model": model, "summary": summary["summary"]}
     except Exception as e:
         logging.error(f"Error processing input: {str(e)}")
