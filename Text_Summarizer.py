@@ -245,8 +245,8 @@ class TextProcessor:
             with the phrase 'This measure...'. The summary should be at least a paragraph and not more than a full page in length. 
             The summary should only include what new is for the piece of legislation, it should not state any opinions or repeat any 
             messages that reflect current law prior to this bill's passage. do not include a title section. do not make the last paragraph 
-            a 'in summary' or 'in conclusion' paragraph. the entire message is a summary there is no need to summarize the summary. If there 
-            is an effective date in the bill then only end the with This measure has an effective date of:else dont add this.
+            a 'in summary' or 'in conclusion' paragraph. the entire message is a summary there is no need to summarize the summary. If an effective date is explicitly stated in the bill text, end the summary with 'This measure has an effective date of:' 
+            followed by the specific date; if no effective date is present, do not include this statement.
             Text to process:
             {combined_text}
             """
