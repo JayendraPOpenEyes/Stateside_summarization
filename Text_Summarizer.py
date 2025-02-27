@@ -21,7 +21,7 @@ import fitz  # PyMuPDF for native PDF text extraction
 from openai import OpenAI
 
 # Load environment variables from .env file
-#load_dotenv()
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -82,14 +82,11 @@ class TextProcessor:
     def extract_text_from_pdf(self, pdf_content, link):
         base_name = self.get_base_name_from_link(link)
         folder = self.get_save_directory(base_name)
-        # Read PDF bytes once so we can reuse them
         pdf_bytes = pdf_content.read()
-        # Attempt native extraction first
         native_text = self.extract_text_from_pdf_native(pdf_bytes)
         if native_text and not self.is_blank_text(native_text):
             logging.info("Native PDF text extraction succeeded.")
             return native_text
-        # Fallback to OCR using in-memory images
         images = convert_from_bytes(pdf_bytes)
         logging.info(f"OCR fallback: converting {len(images)} pages to images.")
         combined_text = ""
@@ -158,11 +155,9 @@ class TextProcessor:
             with open(pdf_path, 'wb') as f:
                 f.write(pdf_bytes)
             logging.info(f"Saved uploaded PDF: {pdf_path}")
-            # Attempt native extraction first; fallback to OCR if needed
             native_text = self.extract_text_from_pdf_native(pdf_bytes)
             if native_text and not self.is_blank_text(native_text):
                 return {"text": native_text, "content_type": "pdf", "error": None}
-            # If native extraction fails, use OCR in parallel
             images = convert_from_bytes(pdf_bytes)
             logging.info(f"OCR fallback: converting {len(images)} page(s) to images.")
             combined_text = ""
@@ -244,41 +239,14 @@ class TextProcessor:
             tokens = tokens[:max_tokens]
         return encoding.decode(tokens)
 
-    def generate_summaries_with_chatgpt(self, combined_text):
+    def generate_summaries_with_chatgpt(self, combined_text, custom_prompt=None):
         combined_text = self.truncate_text(combined_text, max_tokens=4000)
-        prompt = f"""
-Generate the following summaries for the text below. Please adhere to these instructions:
-
-For Abstractive Summary:
-- The summary should be concise and not very long.
-- It should cover all the key points very shortly.
-- Summarize the content in one short paragraph (maximum 8 sentences).
-
-For Extractive Summary:
-- Generate a minimum of 2 paragraphs if the content is sufficiently long; adjust accordingly if the content is short.
-- Provide a sensible extractive summary capturing the main ideas.
-
-For Highlights & Analysis:
-- Produce 15 to 20 bullet points grouped under 4 meaningful headings.
-- Each heading should be relevant to the content and include bullet points with key details.
-- Highlights should be in the form of headings only, followed by bullet points.
-
-Use the following markers exactly for each section:
-
-Abstractive Summary:
-[Abstractive]
-
-Extractive Summary:
-[Extractive]
-
-Highlights & Analysis:
-[Highlights]
-
-Only output the text within these markers without any additional commentary.
-
-Text:
-{combined_text}
-"""
+        # Combine custom prompt with the extracted text
+        if custom_prompt:
+            prompt = f"{custom_prompt}\n\nText to process:\n{combined_text}"
+        else:
+            prompt = f"Summarize the following text:\n{combined_text}"
+        logging.info(f"Sending prompt to OpenAI: {prompt[:100]}...")  # Log first 100 chars for debugging
         try:
             response = self.openai_client.chat.completions.create(
                 model=self.model,
@@ -286,22 +254,12 @@ Text:
                 temperature=0.5,
                 max_tokens=1500,
             )
-            summaries = response.choices[0].message.content
-            abstractive_match = re.search(r"\[Abstractive\](.*?)\[Extractive\]", summaries, re.DOTALL)
-            extractive_match = re.search(r"\[Extractive\](.*?)\[Highlights\]", summaries, re.DOTALL)
-            highlights_match = re.search(r"\[Highlights\](.*)", summaries, re.DOTALL)
-            return {
-                "extractive": extractive_match.group(1).strip() if extractive_match else "Extractive summary not found.",
-                "abstractive": abstractive_match.group(1).strip() if abstractive_match else "Abstractive summary not found.",
-                "highlights": highlights_match.group(1).strip() if highlights_match else "Highlights not found."
-            }
+            summary = response.choices[0].message.content.strip()
+            logging.info(f"Received summary: {summary[:100]}...")  # Log first 100 chars of response
+            return {"summary": summary}
         except Exception as e:
-            logging.error(f"Error generating summaries: {str(e)}")
-            return {
-                "extractive": "Error generating extractive summary.",
-                "abstractive": "Error generating abstractive summary.",
-                "highlights": "Error generating highlights."
-            }
+            logging.error(f"Error generating summary: {str(e)}")
+            return {"summary": f"Error generating summary: {str(e)}"}
 
     # Caching methods
     def get_hash(self, text):
@@ -317,7 +275,6 @@ Text:
             try:
                 with open(cache_file, 'r') as f:
                     cache = json.load(f)
-                # Check cache expiry and hash
                 if time.time() - cache.get("timestamp", 0) < cache_expiry and cache.get("text_hash") == self.get_hash(text):
                     logging.info("Returning cached summary.")
                     return cache.get("summary")
@@ -341,22 +298,15 @@ Text:
 
     def process_raw_text(self, text, base_name="raw_text"):
         clean_text = self.preprocess_text(text)
-        # Check for cached summary first
         cached_summary = self.get_cached_summary(clean_text, base_name)
         if cached_summary:
             return cached_summary
-        summaries = self.generate_summaries_with_chatgpt(clean_text)
+        summary = self.generate_summaries_with_chatgpt(clean_text)
         self.process_full_text_to_json(clean_text, base_name)
-        # Update cache
-        self.update_cached_summary(clean_text, summaries, base_name)
-        return {
-            "model": self.model,
-            "extractive": summaries["extractive"],
-            "abstractive": summaries["abstractive"],
-            "highlights": summaries["highlights"]
-        }
+        self.update_cached_summary(clean_text, summary, base_name)
+        return {"model": self.model, "summary": summary["summary"]}
 
-def process_input(input_data, model="gpt-4o-mini"):
+def process_input(input_data, model="gpt-4o-mini", custom_prompt=None):
     try:
         processor = TextProcessor(model=model)
         if hasattr(input_data, "read") and not isinstance(input_data, str):
@@ -375,7 +325,6 @@ def process_input(input_data, model="gpt-4o-mini"):
             clean_text = processor.preprocess_text(result["text"])
             base_name = file_identifier[-7:] if len(file_identifier) >= 7 else file_identifier
         elif isinstance(input_data, str) and input_data.startswith(("http://", "https://")):
-            # Use asynchronous URL fetching
             result = asyncio.run(processor.async_extract_text_from_url(input_data))
             if result["error"]:
                 return {"error": result["error"], "model": model}
@@ -387,21 +336,14 @@ def process_input(input_data, model="gpt-4o-mini"):
         else:
             return {"error": "Invalid input type. Expected URL, raw text, or an uploaded file.", "model": model}
 
-        # Check cache for summaries to avoid unnecessary API calls if content hasn't changed
         cached_summary = processor.get_cached_summary(clean_text, base_name)
         if cached_summary:
             return cached_summary
 
-        summaries = processor.generate_summaries_with_chatgpt(clean_text)
+        summary = processor.generate_summaries_with_chatgpt(clean_text, custom_prompt)
         processor.process_full_text_to_json(clean_text, base_name)
-        # Update cache with new summary
-        processor.update_cached_summary(clean_text, summaries, base_name)
-        return {
-            "model": model,
-            "extractive": summaries["extractive"],
-            "abstractive": summaries["abstractive"],
-            "highlights": summaries["highlights"]
-        }
+        processor.update_cached_summary(clean_text, summary, base_name)
+        return {"model": model, "summary": summary["summary"]}
     except Exception as e:
         logging.error(f"Error processing input: {str(e)}")
         return {"error": f"An error occurred: {str(e)}", "model": model}
