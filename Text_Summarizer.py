@@ -240,7 +240,17 @@ class TextProcessor:
         if custom_prompt:
             prompt = f"{custom_prompt}\n\nText to process:\n{combined_text}"
         else:
-            prompt = f"Summarize the following text:\n{combined_text}"
+            prompt = f"""
+            Please create a summary of the attached Legislation Bill. Each summary should start 
+            with the phrase 'This measure...'. The summary should be at least a paragraph and not more than a full page in length. 
+            The summary should only include what new is for the piece of legislation, it should not state any opinions or repeat any 
+            messages that reflect current law prior to this bill's passage. do not include a title section. do not make the last paragraph 
+            a 'in summary' or 'in conclusion' paragraph. the entire message is a summary there is no need to summarize the summary. If there 
+            is an effective date in the bill then only end the with This measure has an effective date of:else dont add this.
+            Text to process:
+            {combined_text}
+            """
+            
         logging.info(f"Sending prompt to OpenAI: {prompt[:100]}...")
         try:
             response = self.openai_client.chat.completions.create(
